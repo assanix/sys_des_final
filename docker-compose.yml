@@ -1,0 +1,174 @@
+services:
+  postgres-shard0:
+    image: postgres:16
+    container_name: postgres-shard0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql 
+      - ./db/extensions.sql:/docker-entrypoint-initdb.d/05-extensions.sql 
+      - pgdata-shard0:/var/lib/postgresql/data/pgdata
+    command: >
+      postgres -c "shared_preload_libraries=pg_stat_statements"
+    entrypoint: |
+      bash -c '
+      docker-entrypoint.sh postgres & # Запускаем основной процесс Postgres в фоне
+      PID=$!
+      until pg_isready -U postgres -d postgres -h localhost; do sleep 1; done
+      # Обновляем shard_info ТОЛЬКО после того, как сервер готов и скрипты отработали
+      psql -U postgres -d postgres -c "UPDATE shard_info SET shard_name = '\''shard0'\'', description = '\''This is shard 0'\'' WHERE shard_name = '\''shard_placeholder'\'';"
+      wait $PID
+      '
+    networks:
+      - shard_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-shard1:
+    image: postgres:16
+    container_name: postgres-shard1
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql
+      - ./db/extensions.sql:/docker-entrypoint-initdb.d/05-extensions.sql
+      - pgdata-shard1:/var/lib/postgresql/data/pgdata
+    command: >
+      postgres -c "shared_preload_libraries=pg_stat_statements"
+    entrypoint: |
+      bash -c '
+      docker-entrypoint.sh postgres &
+      PID=$!
+      until pg_isready -U postgres -d postgres -h localhost; do sleep 1; done
+      psql -U postgres -d postgres -c "UPDATE shard_info SET shard_name = '\''shard1'\'', description = '\''This is shard 1'\'' WHERE shard_name = '\''shard_placeholder'\'';"
+      wait $PID
+      '
+    networks:
+      - shard_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-shard2:
+    image: postgres:16
+    container_name: postgres-shard2
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql
+      - ./db/extensions.sql:/docker-entrypoint-initdb.d/05-extensions.sql
+      - pgdata-shard2:/var/lib/postgresql/data/pgdata
+    command: >
+      postgres -c "shared_preload_libraries=pg_stat_statements"
+    entrypoint: |
+      bash -c '
+      docker-entrypoint.sh postgres &
+      PID=$!
+      until pg_isready -U postgres -d postgres -h localhost; do sleep 1; done
+      psql -U postgres -d postgres -c "UPDATE shard_info SET shard_name = '\''shard2'\'', description = '\''This is shard 2'\'' WHERE shard_name = '\''shard_placeholder'\'';"
+      wait $PID
+      '
+    networks:
+      - shard_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- PgBouncer instances ---
+  pgbouncer1:
+    image: pgbouncer/pgbouncer:latest
+    container_name: pgbouncer1
+    restart: unless-stopped
+    volumes:
+      - ./pgbouncer/pgbouncer1.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - pgbouncer_log1:/var/log/pgbouncer
+      - pgbouncer_run1:/var/run/pgbouncer
+    ports:
+      - "6432:6432"
+    networks:
+      - shard_net
+    depends_on:
+      postgres-shard0:
+        condition: service_healthy
+      postgres-shard1:
+        condition: service_healthy
+      postgres-shard2:
+        condition: service_healthy
+    entrypoint: ["/opt/pgbouncer/pgbouncer"] 
+    command: ["-u", "postgres", "/etc/pgbouncer/pgbouncer.ini"]
+
+  pgbouncer2:
+    image: pgbouncer/pgbouncer:latest
+    container_name: pgbouncer2
+    restart: unless-stopped
+    volumes:
+      - ./pgbouncer/pgbouncer2.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - pgbouncer_log2:/var/log/pgbouncer
+      - pgbouncer_run2:/var/run/pgbouncer
+    networks:
+      - shard_net
+    depends_on:
+      postgres-shard0:
+        condition: service_healthy
+      postgres-shard1:
+        condition: service_healthy
+      postgres-shard2:
+        condition: service_healthy
+    entrypoint: ["/opt/pgbouncer/pgbouncer"]
+    command: ["-u", "postgres", "/etc/pgbouncer/pgbouncer.ini"]
+
+  # --- Node.js app ---
+  app:
+    build:
+      context: ./app
+    container_name: notion_app_guide
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      pgbouncer1: 
+        condition: service_started
+      pgbouncer2:
+        condition: service_started
+    environment:
+      - PORT=3000
+      - PGBOUNCER_USER=postgres
+      - PGBOUNCER_PASSWORD=postgres
+    networks:
+      - shard_net
+
+
+networks:
+  shard_net:
+    driver: bridge
+
+
+volumes:
+  pgdata-shard0:
+  pgdata-shard1:
+  pgdata-shard2:
+  pgbouncer_log1:
+  pgbouncer_run1:
+  pgbouncer_log2:
+  pgbouncer_run2:
